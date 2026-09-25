@@ -13,12 +13,12 @@ const LINKS = [
   { href: "/contact", label: "Contact", exact: true },
 ];
 
-// Sticky glass navbar. Portal CTAs hide themselves while their URLs are unset
-// so nothing 404s before the student portal project is deployed.
+// Sticky glass navbar. Student/Staff portal CTAs use env URLs when set and
+// fall back to the live student.jmischool.com / staff.jmischool.com addresses.
 export default function Navbar() {
   const [open, setOpen] = useState(false);
-  const studentPortal = process.env.NEXT_PUBLIC_STUDENT_PORTAL_URL;
-  const adminUrl = process.env.NEXT_PUBLIC_ADMIN_URL;
+  const studentPortal = process.env.NEXT_PUBLIC_STUDENT_PORTAL_URL || "https://student.jmischool.com";
+  const staffPortal = process.env.NEXT_PUBLIC_STAFF_PORTAL_URL || "https://staff.jmischool.com";
 
   return (
     <header className="sticky top-0 z-50 backdrop-blur bg-white/85 border-b border-gray-100">
@@ -51,16 +51,22 @@ export default function Navbar() {
         </nav>
 
         <div className="hidden lg:flex items-center gap-2 ml-4">
-          {studentPortal && (
-            <a
-              href={studentPortal}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-bold px-4 py-2 rounded-full border border-brand text-brand hover:bg-brand-soft inline-flex items-center gap-1"
-            >
-              Check Result <RiExternalLinkLine />
-            </a>
-          )}
+          <a
+            href={studentPortal}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-bold px-4 py-2 rounded-full border border-brand text-brand hover:bg-brand-soft inline-flex items-center gap-1"
+          >
+            Student Portal <RiExternalLinkLine />
+          </a>
+          <a
+            href={staffPortal}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm font-bold px-4 py-2 rounded-full border border-brand text-brand hover:bg-brand-soft inline-flex items-center gap-1"
+          >
+            Staff Portal <RiExternalLinkLine />
+          </a>
           <Link href="/admissions" className="text-sm font-bold px-4 py-2 rounded-full brand-gradient text-white hover:opacity-90">
             Enroll Your Child
           </Link>
@@ -85,16 +91,12 @@ export default function Navbar() {
             )
           )}
           <Link href="/cbt" onClick={() => setOpen(false)} className="text-sm font-semibold text-brand-light">CBT Portal</Link>
-          {studentPortal && (
-            <a href={studentPortal} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-brand">
-              Check Result ↗
-            </a>
-          )}
-          {adminUrl && (
-            <a href={adminUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-semibold text-gray-500">
-              Staff / Admin Login ↗
-            </a>
-          )}
+          <a href={studentPortal} target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)} className="text-sm font-semibold text-brand">
+            Student Portal ↗
+          </a>
+          <a href={staffPortal} target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)} className="text-sm font-semibold text-brand">
+            Staff Portal ↗
+          </a>
           <Link href="/admissions" onClick={() => setOpen(false)} className="text-sm font-bold px-4 py-2 rounded-full brand-gradient text-white text-center">
             Enroll Your Child
           </Link>

@@ -5,7 +5,6 @@ import Link from "next/link";
 import Image from "next/image";
 import { useSettings } from "../lib/useSettings";
 import {
-  RiFacebookBoxLine,
   RiMailLine,
   RiPhoneLine,
   RiMapPinLine,
@@ -97,17 +96,6 @@ export default function Footer() {
                 </a>
               </li>
             )}
-            <li className="flex gap-2">
-              <RiFacebookBoxLine className="shrink-0 mt-0.5 text-brand-light" />
-              <a
-                href="https://www.facebook.com/profile.php?id=100092432334656"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:underline"
-              >
-                Facebook: Rhema Expert Solutions
-              </a>
-            </li>
           </ul>
         </div>
       </div>
