@@ -1,0 +1,1 @@
+Root scripts run the default Next.js dev/build/start/lint against whichever app is configured as the Next entry point; environment variables `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_STUDENT_PORTAL_URL`, and `NEXT_PUBLIC_ADMIN_URL` must be set in `.env.local`.

@@ -1,0 +1,1 @@
+Public-facing Next.js marketing site for Jeshurun Montessori International School, rendering static pages whose content is driven by a single admin-managed jmis_settings row in Supabase.

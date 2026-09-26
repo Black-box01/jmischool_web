@@ -1,0 +1,1 @@
+React 18 + Next.js App Router (`next/navigation`), Bootstrap CSS, react-bootstrap, react-toastify for notifications, @supabase/supabase-js for database access, compromise NLP library for semantic grading of completion/essay answers, and a custom `/api/send-email` route for email delivery.

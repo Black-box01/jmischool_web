@@ -1,0 +1,5 @@
+- Every client component file begins with the `'use client';` directive before any imports, separating it from server-rendered layout/page code.
+- All public-facing content is consumed through the shared `useSettings()` hook rather than direct Supabase calls, keeping the `jmis_settings` row as the single source of truth.
+- Supabase image URLs are constructed via the `settingFileUrl(file)` helper instead of embedding raw paths, centralizing the public storage bucket URL.
+- User-triggered actions (enquiries, admissions applications) write to Supabase first and then call `/api/notify` as a fire-and-forget side effect so email failures never block the user flow.
+- Email recipients are assembled server-side in `app/api/notify/route.js`, which always folds in the school's `adminEmail` from `jmis_settings` alongside caller-supplied addresses and deduplicates them case-insensitively.

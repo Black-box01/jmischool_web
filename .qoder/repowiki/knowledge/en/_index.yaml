@@ -1,0 +1,46 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en-US
+branch: main
+nodes_managed: true
+exported_at: "2026-09-26T05:32:55Z"
+modules:
+    "":
+        dir_name: JMISchool Website Monorepo (Marketing Site + Exam Portal)
+        title: JMISchool Website Monorepo (Marketing Site + Exam Portal)
+        scope:
+            - README.md
+            - .gitignore
+            - jsconfig.json
+            - next.config.mjs
+            - package.json
+            - package-lock.json
+            - postcss.config.mjs
+        source_files: []
+        children:
+            - exam_quiz
+            - marketing_site
+        depends_on: []
+        related_to: []
+    exam_quiz:
+        dir_name: CBT Exam Portal (Objective, Completion & Essay Sessions)
+        title: CBT Exam Portal (Objective, Completion & Essay Sessions)
+        scope:
+            - src/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: marketing_site
+    marketing_site:
+        dir_name: JMIS Marketing Website (Next.js Public Site)
+        title: JMIS Marketing Website (Next.js Public Site)
+        scope:
+            - app/
+            - components/
+            - lib/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: exam_quiz

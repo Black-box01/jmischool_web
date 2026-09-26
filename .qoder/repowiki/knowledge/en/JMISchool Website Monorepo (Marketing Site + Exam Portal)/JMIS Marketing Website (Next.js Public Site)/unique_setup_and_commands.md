@@ -1,0 +1,1 @@
+Requires environment variables `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`; optional `NEXT_PUBLIC_STUDENT_PORTAL_URL` toggles the 'Check Result' CTA in Hero/Footer. Content is managed exclusively through the admin dashboard's Settings page writing to the `jmis_settings` row — no CMS or markdown files are read at runtime.

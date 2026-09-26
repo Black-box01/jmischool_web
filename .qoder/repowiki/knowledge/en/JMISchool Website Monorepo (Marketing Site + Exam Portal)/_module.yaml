@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: ""
+title: JMISchool Website Monorepo (Marketing Site + Exam Portal)
+scope:
+    - README.md
+    - .gitignore
+    - jsconfig.json
+    - next.config.mjs
+    - package.json
+    - package-lock.json
+    - postcss.config.mjs
+source_files: []
+depends_on: []
+related_to: []

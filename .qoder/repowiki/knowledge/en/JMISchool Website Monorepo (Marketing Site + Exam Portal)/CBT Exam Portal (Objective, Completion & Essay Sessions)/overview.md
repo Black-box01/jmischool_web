@@ -1,0 +1,1 @@
+Next.js client-side exam portal for JMIC students to take objective, completion, and essay CBT sessions, score answers locally, persist progress, and submit results to Supabase.

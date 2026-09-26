@@ -1,0 +1,2 @@
+- Supabase access is performed through the `@supabase/supabase-js` client initialized from the `NEXT_PUBLIC_SUPABASE_*` environment variables.
+- Public-facing URLs to the student portal and admin area are consumed via `NEXT_PUBLIC_STUDENT_PORTAL_URL` and `NEXT_PUBLIC_ADMIN_URL` rather than hard-coded paths.

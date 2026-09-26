@@ -1,0 +1,10 @@
+Three-layer client UI built on Next.js App Router with React server components disabled (`'use client'`) so all stateful logic runs in the browser.
+
+- `pages_components/` holds the three session entry points: `QuizHome.jsx` is the landing page that selects a subject/class/session type and routes via `router.push('/exam?…')`; `QuizComponent.jsx` renders the objective multiple-choice exam; `CompletionExam.jsx` and `EssayExam.jsx` render fill-in-the-blank and free-text exams respectively. Each exam component reads its parameters from `useSearchParams`, fetches questions from a dedicated Supabase table (`jmis_cbtQuestions`, `jmis_cbt_completion`, `jmis_cbt_essay`), enforces a per-session timer, and writes results back through `prepareResultData` / `saveResultToDatabase` into either `jmis_result` (objective) or `jmis_cbt_results` (completion/essay).
+- `api/emailNotificationService.js` is the only outbound HTTP boundary: it POSTs to `/api/send-email` with subject/message/recipients after resolving admin emails from `jmis_settings`.
+- `utils/nlpScorer.js` provides pure functions `evaluateCompletion` and `evaluateEssay` powered by `compromise` NLP, used exclusively by the completion/essay exam components to grade text answers.
+- `utils/subjectUtils.js` exports the canonical `schoolSubjects` mapping per class level plus abbreviation/normalization helpers consumed when constructing result rows.
+- `supabaseClient.js` is the single shared Supabase client instance created from `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+- Styling is split across `styles/QuizHome.css`, `styles/QuizComponent.css`, and `styles/DetailedResults.css` (the latter generated inline HTML print view for objective results).
+
+Dependency direction is one-way: pages_components → utils + api + supabaseClient; utils and api have no internal dependencies.

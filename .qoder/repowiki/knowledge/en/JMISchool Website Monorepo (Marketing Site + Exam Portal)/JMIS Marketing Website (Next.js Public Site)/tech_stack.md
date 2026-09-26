@@ -1,0 +1,1 @@
+Next.js App Router (React Server Components + Client Components), Tailwind CSS, @supabase/supabase-js (anon key only), react-icons, nodemailer sending through Gmail SMTP (hosted on Vercel with GMAIL_USER / GMAIL_APP_PASSWORD env vars).

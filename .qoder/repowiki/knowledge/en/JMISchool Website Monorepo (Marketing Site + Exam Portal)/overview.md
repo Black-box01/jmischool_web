@@ -1,0 +1,1 @@
+Next.js monorepo hosting the public JMIS marketing site and the student CBT exam portal, both sharing Supabase, Tailwind/Bootstrap styling, and a common lib layer.

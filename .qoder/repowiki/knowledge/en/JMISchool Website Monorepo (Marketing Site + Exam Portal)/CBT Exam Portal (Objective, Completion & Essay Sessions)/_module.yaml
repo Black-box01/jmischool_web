@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: exam_quiz
+title: CBT Exam Portal (Objective, Completion & Essay Sessions)
+scope:
+    - src/
+source_files: []
+depends_on: []
+related_to:
+    - path: marketing_site

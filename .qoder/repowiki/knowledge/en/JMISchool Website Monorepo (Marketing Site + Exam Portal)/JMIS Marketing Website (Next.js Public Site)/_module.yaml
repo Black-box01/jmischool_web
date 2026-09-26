@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: marketing_site
+title: JMIS Marketing Website (Next.js Public Site)
+scope:
+    - app/
+    - components/
+    - lib/
+source_files: []
+depends_on: []
+related_to:
+    - path: exam_quiz

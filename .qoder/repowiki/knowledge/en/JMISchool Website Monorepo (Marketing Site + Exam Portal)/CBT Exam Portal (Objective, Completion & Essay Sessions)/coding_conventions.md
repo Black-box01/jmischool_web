@@ -1,0 +1,6 @@
+- Each exam component is a `'use client'` React function component that derives student/session identity from `useSearchParams()` query params (`name`, `newClass`, `currentTerm`, `subject`, `duration`, `purpose`).
+- Supabase queries use `.ilike('%...%')` filters on `subject` and `class` fields and surface errors via `toast.error` rather than throwing up the stack.
+- Exam progress is auto-saved to `localStorage` under keys prefixed by session type (`cbt_exam_*`, `cbt_completion_*`, `cbt_essay_*`) and restored on mount via a `loadFromLocalStorage` helper.
+- Admin protection is implemented per-component: each exam loads `cbtPassword` from `jmis_settings`, starts locked (`isLocked = true`), and requires the correct password before rendering the quiz UI.
+- Result submission follows a consistent pipeline: `handleSubmitExam` → `uploadResults` → `prepareResultData` → `saveResultToDatabase` → `sendResultEmail`, with practice-purpose exams short-circuiting the persistence step.
+- Text-answer scoring is delegated to pure functions in `utils/nlpScorer.js` (`evaluateCompletion`, `evaluateEssay`) rather than being computed inline inside the components.

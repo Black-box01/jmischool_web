@@ -1,0 +1,1 @@
+Next.js 16 + React 19, Supabase client, Tailwind CSS v4 (PostCSS plugin), Bootstrap 5 + react-bootstrap, Nodemailer, Compromise, React Icons, React Toastify.
