@@ -429,8 +429,7 @@ const QuizComponent = () => {
     
     // Determine school name based on class/year
     const schoolName = (newClass.toLowerCase().includes('year') && 
-                       (parseInt(newClass.split(' ')[1]) >= 7 || 
-                        ['jss1', 'jss2', 'jss3', 'ss1', 'ss2', 'ss3'].includes(newClass.toLowerCase()))) 
+                       parseInt(newClass.split(' ')[1]) >= 7) 
       ? 'Jeshurun Montessori International High School'
       : 'Jeshurun Montessori International School';
     

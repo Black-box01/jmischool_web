@@ -11,8 +11,8 @@ const LABEL = "block text-xs font-bold uppercase tracking-wide text-gray-500 mb-
 
 const CLASSES = [
   "Creche", "PreNursery1", "PreNursery2", "Nursery 1", "Nursery 2",
-  "Year 1", "Year 2", "Year 3", "Year 4", "Year 5",
-  "JSS1", "JSS2", "JSS3", "SS1", "SS2", "SS3",
+  "Year 1", "Year 2", "Year 3", "Year 4", "Year 5", "Year 6",
+  "Year 7", "Year 8", "Year 9", "Year 10", "Year 11", "Year 12",
 ];
 
 const STEPS = [

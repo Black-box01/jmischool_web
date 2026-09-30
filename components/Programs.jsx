@@ -21,13 +21,13 @@ const PROGRAMS = [
   },
   {
     icon: <RiBookOpenLine />,
-    title: "Primary (Years 1–5)",
+    title: "Primary (Years 1–6)",
     ages: "6 – 11 years",
     points: ["Strong literacy & numeracy foundation", "Computing and character studies", "Continuous CBT assessments"],
   },
   {
     icon: <RiGraduationCapLine />,
-    title: "Secondary (JSS – SS)",
+    title: "Secondary (Years 7–12)",
     ages: "11 – 17 years",
     points: ["Full national curriculum", "Science, arts & technical subjects", "Exam-class coaching (BECE/WAEC)"],
   },
