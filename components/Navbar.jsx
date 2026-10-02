@@ -3,7 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { RiMenu3Line, RiCloseLine, RiExternalLinkLine, RiArrowDownSLine } from "react-icons/ri";
+import { RiMenu3Line, RiCloseLine, RiExternalLinkLine, RiArrowDownSLine, RiDownloadLine } from "react-icons/ri";
 
 const LINKS = [
   { href: "/#about", label: "About" },
@@ -22,6 +22,10 @@ export default function Navbar() {
   const dropdownRef = useRef(null);
   const studentPortal = process.env.NEXT_PUBLIC_STUDENT_PORTAL_URL || "https://student.jmischool.com";
   const staffPortal = process.env.NEXT_PUBLIC_STAFF_PORTAL_URL || "https://staff.jmischool.com";
+  // Attendance app (Android APK on Google Drive) — for admin / security staff.
+  const attendanceApp =
+    process.env.NEXT_PUBLIC_ATTENDANCE_APP_URL ||
+    "https://drive.google.com/file/d/1GaQ2VK-xJD32cnQR1i3n3Zsm4VRkz7d-/view?usp=sharing";
 
   // Close the desktop Portal dropdown when clicking outside or pressing Escape.
   useEffect(() => {
@@ -44,6 +48,7 @@ export default function Navbar() {
     { label: "CBT Portal", href: "/cbt", external: false },
     { label: "Student Portal", href: studentPortal, external: true },
     { label: "Staff Portal", href: staffPortal, external: true },
+    { label: "Attendance App", href: attendanceApp, external: true, download: true },
   ];
 
   return (
@@ -96,7 +101,7 @@ export default function Navbar() {
                       onClick={() => setPortalOpen(false)}
                       className="flex items-center justify-between gap-2 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-brand-soft hover:text-brand"
                     >
-                      {item.label} <RiExternalLinkLine className="text-gray-400" />
+                      {item.label} {item.download ? <RiDownloadLine className="text-gray-400" /> : <RiExternalLinkLine className="text-gray-400" />}
                     </a>
                   ) : (
                     <Link
@@ -151,6 +156,9 @@ export default function Navbar() {
               </a>
               <a href={staffPortal} target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)} className="flex items-center gap-1 text-sm font-semibold text-gray-700">
                 Staff Portal <RiExternalLinkLine className="text-gray-400" />
+              </a>
+              <a href={attendanceApp} target="_blank" rel="noopener noreferrer" onClick={() => setOpen(false)} className="flex items-center gap-1 text-sm font-semibold text-gray-700">
+                Attendance App <RiDownloadLine className="text-gray-400" />
               </a>
             </div>
           )}
