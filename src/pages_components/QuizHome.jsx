@@ -112,9 +112,16 @@ const QuizHome = () => {
         if (sessionType === 'completion') tableName = 'jmis_cbt_completion';
         else if (sessionType === 'essay') tableName = 'jmis_cbt_essay';
 
-        const { data, error } = await supabase
-          .from(tableName)
-          .select('subject, class, duration, questions, image, purpose, term, created_at, updated_at');
+        const allColumns = 'subject, class, duration, questions, image, purpose, term, maxScore, created_at, updated_at';
+
+        let result = await supabase.from(tableName).select(allColumns);
+        if (result.error && /maxScore/i.test(result.error.message || '')) {
+          // The declared-marks column is optional until jmis_cbt_max_score.sql has
+          // been run: the list must still load, defaulting to one mark per question
+          result = await supabase.from(tableName).select(allColumns.replace(', maxScore', ''));
+        }
+
+        const { data, error } = result;
         if (error) throw error;
         const formattedSubjects = data.map(subject => ({
           name: subject.subject,
@@ -124,6 +131,9 @@ const QuizHome = () => {
           purpose: subject.purpose || 'practice',
           term: subject.term || '',
           questions: subject.questions.length,
+          // Marks the paper is worth: what the teacher declared, else one mark per
+          // question. The student can then see the true maximum before starting.
+          maxScore: Number(subject.maxScore) > 0 ? Number(subject.maxScore) : subject.questions.length,
           created_at: subject.created_at || new Date().toISOString(),
           updated_at: subject.updated_at || subject.created_at || new Date().toISOString(),
         }));
@@ -148,7 +158,7 @@ const QuizHome = () => {
   //   }
   // };
 
-  const handleStartExam = (subject, duration, purpose) => {
+  const handleStartExam = (subject, duration, purpose, maxScore) => {
     // Find matching student to ensure correct casing
     const matchedStudent = studentsOptions.find(s => 
       s.name.toLowerCase() === name.toLowerCase().trim() && 
@@ -170,6 +180,9 @@ const QuizHome = () => {
       subject,
       duration,
       purpose,
+      // Display only: the exam screen always re-reads the paper from the server
+      // before it works out any mark
+      ...(maxScore ? { maxScore } : {}),
       sessionType
     }).toString();
     router.push(`/exam?${queryParams}`);
@@ -483,10 +496,10 @@ const QuizHome = () => {
                     <h5 className="card-title">{subject.name}</h5>
                     <p className="card-text"><span className='text-primary' style={{fontWeight: '600'}}>Class: </span>{subject.class}</p>
                     <p className="card-text"><span className='text-primary' style={{fontWeight: '600'}}>Duration: </span>{formatDuration(subject.duration)}</p>
-                    <p className="card-text"><span className='text-primary' style={{ fontWeight: '600' }}>Questions: </span>{subject.questions} questions</p>
+                    <p className="card-text"><span className='text-primary' style={{ fontWeight: '600' }}>Questions: </span>{subject.questions} questions · max {subject.maxScore} marks</p>
                     <p className="card-text"><span className='text-primary' style={{ fontWeight: '600' }}>Type: </span>{(subject.purpose === 'midterm' || subject.purpose === 'test') ? 'Mid-term Test' : subject.purpose === 'exam' ? 'Exam' : 'Practice'}</p>
                     <div className='flex d-flex align-self-center gap-3'>
-                    <button onClick={() => handleStartExam(subject.name, subject.duration, subject.purpose)} className="btn btn-primary" disabled={isStartExamDisabled}>
+                    <button onClick={() => handleStartExam(subject.name, subject.duration, subject.purpose, subject.maxScore)} className="btn btn-primary" disabled={isStartExamDisabled}>
                       Start Exam
                       </button>
                       <div style={{gap: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center'}}>

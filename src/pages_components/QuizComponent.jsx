@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { ToastContainer, toast } from 'react-toastify';
@@ -11,9 +11,25 @@ import '../styles/QuizComponent.css';
 import '../styles/DetailedResults.css';
 import { FaCheck, FaTrophy, FaEye, FaEyeSlash } from 'react-icons/fa';
 import { schoolSubjects } from '../utils/subjectUtils';
+import {
+  normalizePurpose,
+  sectionMaxFor,
+  SECTION_LABEL,
+  SECTION_MAX,
+  recomputeCorrect,
+  sanitizeAnswers,
+  paperMaxScore,
+  scaleScore,
+  storedScore,
+  gradeFor,
+} from '../utils/cbtScoring';
+import { buildJob, enqueueJob, flushQueue, subscribeToQueue } from '../utils/cbtSubmitQueue';
 
 // Using logo from public directory
 const logo = '/logo.jpg';
+
+// Log of attempts whose email notification has already gone out
+const EMAIL_LOG_KEY = 'cbt_email_keys';
 
 
 
@@ -32,7 +48,6 @@ const QuizComponent = () => {
   const [questions, setQuestions] = useState([]);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [showScore, setShowScore] = useState(false);
-  const [score, setScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(duration * 60); // Convert duration from minutes to seconds
   const [answers, setAnswers] = useState({}); // Store user answers
   const [adminPassword, setAdminPassword] = useState(null); // State to store admin password, init to null
@@ -40,21 +55,51 @@ const QuizComponent = () => {
   const [passwordInput, setPasswordInput] = useState(""); // State to manage password input visibility
   const [showPassword, setShowPassword] = useState(false); // State to manage password visibility
   const [isSubmitted, setIsSubmitted] = useState(false); // State to manage submission status
-  
+
+  // The paper actually loaded from the database. Its id and declared marks drive
+  // every calculation, so nothing saved on the machine can decide a score.
+  const [examRow, setExamRow] = useState(null);
+
   // Network reliability features
   const [networkStatus, setNetworkStatus] = useState({ isOnline: true, quality: 'good' });
-  const [saveAttempts, setSaveAttempts] = useState(0);
-  const [pendingResult, setPendingResult] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
-  
+  const [queueCount, setQueueCount] = useState(0); // results waiting on this device
+
   // Result review features
   const [showDetailedResults, setShowDetailedResults] = useState(false);
   const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(null);
-  
+
   // LocalStorage auto-save features
   const [isSavingToStorage, setIsSavingToStorage] = useState(false);
   const [lastSaved, setLastSaved] = useState(null);
-  const examId = `cbt_exam_${name}_${subject}_${newClass}_${Date.now()}`;
+
+  // One attempt is submitted once, however it is triggered (button, timer expiry
+  // or a re-render calling submit again)
+  const submittedRef = useRef(false);
+
+  // The attempt record is keyed on the exam row id rather than Date.now(), so
+  // reloading the same paper resumes it instead of opening a brand new record.
+  const keyPart = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  const attemptKeyFor = (rowId) =>
+    rowId ? `cbt_attempt_${rowId}_${keyPart(name)}_${keyPart(newClass)}_${keyPart(currentTerm)}` : null;
+  const examKey = attemptKeyFor(examRow?.id);
+
+  // Where the marks go is decided by the purpose stored on the paper (falling
+  // back to the URL), normalised so 'Midterm' / 'EXAM ' cannot slip past the
+  // clamps. null = nothing is persisted (practice papers).
+  const normPurpose = normalizePurpose(examRow?.purpose ?? purpose);
+  const sectionMax = normPurpose ? sectionMaxFor(normPurpose) : 0;
+
+  // Live, always-recomputed view of this attempt
+  const correctCount = recomputeCorrect(answers, questions);
+  const paperMax = paperMaxScore(examRow, questions.length);
+  const scaledScore = scaleScore(correctCount, questions.length, paperMax);
+  const storedMarks = storedScore({
+    correct: correctCount,
+    questionCount: questions.length,
+    paperMax,
+    purpose: normPurpose,
+  });
 
   useEffect(() => {
     const fetchQuestions = async () => {
@@ -78,34 +123,49 @@ const QuizComponent = () => {
           console.log('📋 [QuizComponent] All matching questions in database:', allQuestions);
         }
         
-        let query = supabase
-          .from('jmis_cbtQuestions')
-          .select('questions, subject, class, purpose, term');
-
-        if (subject) {
-          query = query.ilike('subject', `%${subject.trim()}%`);
-        }
-
-        if (newClass) {
-          // Make class matching case-insensitive
-          query = query.ilike('class', `%${newClass.trim()}%`);
-        }
-
-        if (purpose) {
-          const trimmedPurpose = purpose.trim().toLowerCase();
-          // Allow 'test' to match 'midterm' as well, since they are often used interchangeably in result processing
-          if (trimmedPurpose === 'test' || trimmedPurpose === 'midterm') {
-            query = query.or(`purpose.ilike.%test%,purpose.ilike.%midterm%`);
-          } else {
-            query = query.ilike('purpose', `%${trimmedPurpose}%`);
+        // Reusable filter chain, so the search can be repeated without the
+        // declared-marks column when that column does not exist yet
+        const withPaperFilters = (paperQuery) => {
+          if (subject) {
+            paperQuery = paperQuery.ilike('subject', `%${subject.trim()}%`);
           }
+
+          if (newClass) {
+            // Make class matching case-insensitive
+            paperQuery = paperQuery.ilike('class', `%${newClass.trim()}%`);
+          }
+
+          if (purpose) {
+            const trimmedPurpose = purpose.trim().toLowerCase();
+            // Allow 'test' to match 'midterm' as well, since they are often used interchangeably in result processing
+            if (trimmedPurpose === 'test' || trimmedPurpose === 'midterm') {
+              paperQuery = paperQuery.or(`purpose.ilike.%test%,purpose.ilike.%midterm%`);
+            } else {
+              paperQuery = paperQuery.ilike('purpose', `%${trimmedPurpose}%`);
+            }
+          }
+
+          if (currentTerm) {
+            paperQuery = paperQuery.ilike('term', `%${currentTerm.trim()}%`);
+          }
+
+          // When several papers match, always take the same one (newest) instead of
+          // whatever order the database happened to return
+          return paperQuery.order('created_at', { ascending: false });
+        };
+
+        const searchPapers = async (columns) => withPaperFilters(
+          supabase.from('jmis_cbtQuestions').select(columns)
+        );
+
+        let result = await searchPapers('id, questions, subject, class, purpose, term, maxScore, created_at');
+        if (result.error && /maxScore/i.test(result.error.message || '')) {
+          // The paper is still gradeable at one mark per question, so the exam must
+          // open even before jmis_cbt_max_score.sql has been run
+          result = await searchPapers('id, questions, subject, class, purpose, term, created_at');
         }
 
-        if (currentTerm) {
-          query = query.ilike('term', `%${currentTerm.trim()}%`);
-        }
-
-        const { data, error } = await query;
+        const { data, error } = result;
         
         if (error) {
           console.error('❌ [QuizComponent] Database error:', error);
@@ -125,14 +185,21 @@ const QuizComponent = () => {
           toast.error(`No questions available for Subject: ${subject}, Class: ${newClass}, Purpose: ${purpose || 'Any'}.`);
         }
         
-        const fetchedQuestions = data && data.length > 0 ? data[0].questions || [] : [];
+        const chosenRow = (data && data.length > 0)
+          ? [...data].sort((a, b) => new Date(b?.created_at || 0) - new Date(a?.created_at || 0))[0]
+          : null;
+        if (data && data.length > 1) {
+          console.warn('⚠️ [QuizComponent] Several papers match this search, using the newest:',
+            data.map((row) => row.id));
+        }
+
+        setExamRow(chosenRow);
+        const fetchedQuestions = chosenRow?.questions || [];
         setQuestions(fetchedQuestions);
-        
-        // Try to load saved progress after questions are loaded
+
+        // Resume an interrupted attempt of THIS paper, if there is one
         if (fetchedQuestions.length > 0) {
-          setTimeout(() => {
-            loadFromLocalStorage();
-          }, 500);
+          loadFromLocalStorage(fetchedQuestions, attemptKeyFor(chosenRow?.id));
         }
       } catch (error) {
         console.error('❌ [QuizComponent] Error fetching questions:', error);
@@ -176,10 +243,10 @@ const QuizComponent = () => {
         if (error) {
           setNetworkStatus({ isOnline: false, quality: 'offline' });
         } else {
-          setNetworkStatus({
-            isOnline: true,
-            quality: latency < 1000 ? 'good' : latency < 3000 ? 'poor' : 'offline'
-          });
+          const quality = latency < 1000 ? 'good' : latency < 3000 ? 'poor' : 'offline';
+          setNetworkStatus({ isOnline: true, quality });
+          // A reachable server is the signal to push whatever is queued
+          if (quality !== 'offline') flushRef.current?.();
         }
       } catch {
         setNetworkStatus({ isOnline: false, quality: 'offline' });
@@ -189,6 +256,54 @@ const QuizComponent = () => {
     checkNetworkQuality();
     const interval = setInterval(checkNetworkQuality, 5000);
     return () => clearInterval(interval);
+  }, []);
+
+  // ---- offline submission queue ------------------------------------------
+  // The internet in the exam room is slow and shared, so a submission is written
+  // to localStorage first and only removed once the server has acknowledged it.
+  // Jobs are flushed on mount, when the browser says it is back online, when the
+  // tab becomes visible, on the network tick and every 20 seconds here.
+  const flushRef = useRef(null);
+  const submitJobRef = useRef(null);
+
+  useEffect(() => {
+    // always point at the freshest closures (supabase writes, student details)
+    submitJobRef.current = persistQueuedSubmission;
+    flushRef.current = async () => {
+      if (!submitJobRef.current) return;
+      const { flushed } = await flushQueue({ submitJob: submitJobRef.current });
+      if (flushed > 0) toast.success(`✅ ${flushed} exam result(s) uploaded.`);
+    };
+  });
+
+  useEffect(() => {
+    const unsubscribe = subscribeToQueue((jobs) => setQueueCount(jobs.length));
+
+    // Clear attempt records written by the old Date.now() key format, which could
+    // be resumed onto an unrelated paper and carry its marks along
+    try {
+      Object.keys(localStorage)
+        .filter((key) => key.startsWith('cbt_exam_'))
+        .slice(0, 200)
+        .forEach((key) => localStorage.removeItem(key));
+    } catch (error) {
+      console.warn('⚠️ [Queue] Could not prune old attempt records:', error);
+    }
+
+    flushRef.current?.();
+
+    const goOnline = () => flushRef.current?.();
+    const becameVisible = () => { if (!document.hidden) flushRef.current?.(); };
+    window.addEventListener('online', goOnline);
+    document.addEventListener('visibilitychange', becameVisible);
+    const heartbeat = setInterval(() => flushRef.current?.(), 20000);
+
+    return () => {
+      window.removeEventListener('online', goOnline);
+      document.removeEventListener('visibilitychange', becameVisible);
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -207,6 +322,14 @@ const QuizComponent = () => {
 
     return () => clearInterval(timer);
   }, [isLocked]);
+
+  // Running out of time used to only show the score screen, so those scripts were
+  // never recorded. The clock reaching zero now submits the attempt as well
+  // (handleSubmitExam ignores a repeat call).
+  useEffect(() => {
+    if (isLocked || timeLeft !== 0) return;
+    handleSubmitExam();
+  }, [timeLeft, isLocked]);
 
   useEffect(() => {
     const handleBeforeUnload = (event) => {
@@ -259,31 +382,23 @@ const QuizComponent = () => {
   };
 
   const handleAnswerOptionClick = (index) => {
-    const previousAnswer = answers[currentQuestion];
-    const newAnswers = { ...answers, [currentQuestion]: index };
+    const newAnswers = sanitizeAnswers({ ...answers, [currentQuestion]: index }, questions);
     setAnswers(newAnswers);
-    
-    // Recalculate score from scratch to avoid double-counting
-    let newScore = 0;
-    Object.keys(newAnswers).forEach(qIndex => {
-      const qIdx = parseInt(qIndex);
-      const selectedOption = newAnswers[qIdx];
-      if (questions[qIdx] && questions[qIdx].answerOptions[selectedOption]?.isCorrect) {
-        newScore++;
-      }
-    });
-    setScore(newScore);
-    
-    // Auto-save to localStorage
-    saveToLocalStorage(newAnswers, newScore);
+
+    // Auto-save to localStorage; the count is derived from `answers` on render
+    saveToLocalStorage(newAnswers, questions.length);
   };
   
-  // Save exam progress to localStorage
-  const saveToLocalStorage = (currentAnswers, currentScore) => {
+  // Save exam progress to localStorage. Only the raw answers are kept: the score
+  // is always recounted on restore, so a number saved against one paper can never
+  // be carried into another.
+  const saveToLocalStorage = (currentAnswers, questionCount) => {
+    if (!examKey) return;
     try {
       setIsSavingToStorage(true);
       const examData = {
-        examId,
+        examKey,
+        examRowId: examRow?.id ?? null,
         name,
         newClass,
         currentTerm,
@@ -291,14 +406,14 @@ const QuizComponent = () => {
         purpose,
         duration,
         answers: currentAnswers,
-        score: currentScore,
+        questionCount,
         currentQuestion,
         timeLeft,
         timestamp: new Date().toISOString(),
         isComplete: false
       };
       
-      localStorage.setItem(examId, JSON.stringify(examData));
+      localStorage.setItem(examKey, JSON.stringify(examData));
       setLastSaved(new Date());
       console.log('💾 [AutoSave] Saved to localStorage');
     } catch (error) {
@@ -308,30 +423,37 @@ const QuizComponent = () => {
     }
   };
   
-  // Load exam progress from localStorage
-  const loadFromLocalStorage = () => {
+  // Resume the saved attempt of THIS paper, keyed on the exam row id. The old
+  // lookup matched any record whose key merely contained the student's name and
+  // the subject word, so a 50-question sitting could hand its score to a
+  // 20-question exam and the student would finish "above the maximum".
+  const loadFromLocalStorage = (loadedQuestions, key) => {
     try {
-      // Find the most recent exam for this student/subject
-      const keys = Object.keys(localStorage).filter(key => 
-        key.startsWith('cbt_exam_') && 
-        key.includes(name) && 
-        key.includes(subject)
-      );
-      
-      if (keys.length > 0) {
-        const mostRecentKey = keys[keys.length - 1];
-        const savedData = JSON.parse(localStorage.getItem(mostRecentKey));
-        
-        if (savedData && !savedData.isComplete) {
-          console.log('📂 [AutoLoad] Found saved exam:', savedData.timestamp);
-          setAnswers(savedData.answers || {});
-          setScore(savedData.score || 0);
-          setCurrentQuestion(savedData.currentQuestion || 0);
-          setTimeLeft(savedData.timeLeft || duration * 60);
-          toast.info('Restored your previous exam progress!');
-          return true;
-        }
+      if (!key || !loadedQuestions?.length) return false;
+      const raw = localStorage.getItem(key);
+      if (!raw) return false;
+
+      const savedData = JSON.parse(raw);
+      if (!savedData || savedData.isComplete) return false;
+
+      const savedCount = Number(savedData.questionCount || 0);
+      if (savedCount && savedCount !== loadedQuestions.length) {
+        localStorage.removeItem(key);
+        toast.info('Starting a fresh attempt — the previous paper differs.');
+        return false;
       }
+
+      const cleanAnswers = sanitizeAnswers(savedData.answers || {}, loadedQuestions);
+      console.log('📂 [AutoLoad] Found saved attempt:', savedData.timestamp);
+      setAnswers(cleanAnswers);
+      setCurrentQuestion(
+        Number.isInteger(savedData.currentQuestion) && savedData.currentQuestion >= 0 && savedData.currentQuestion < loadedQuestions.length
+          ? savedData.currentQuestion
+          : 0
+      );
+      setTimeLeft(savedData.timeLeft || duration * 60);
+      toast.info('Restored your previous exam progress!');
+      return true;
     } catch (error) {
       console.error('❌ [AutoLoad] Error loading from localStorage:', error);
     }
@@ -351,18 +473,26 @@ const QuizComponent = () => {
   };
 
   const handleSubmitExam = async () => {
-    // Mark exam as complete in localStorage
-    try {
-      const examData = JSON.parse(localStorage.getItem(examId) || '{}');
-      examData.isComplete = true;
-      localStorage.setItem(examId, JSON.stringify(examData));
-    } catch (error) {
-      console.error('Error marking exam complete:', error);
+    // A student can press Submit and the clock can expire in the same second, or
+    // press it twice on a slow connection. One attempt, one result.
+    if (submittedRef.current) return;
+    submittedRef.current = true;
+
+    // Flag the local record only once the submission is safely queued, and delete
+    // it only after the server has acknowledged it (inside uploadResults)
+    if (examKey) {
+      try {
+        const examData = JSON.parse(localStorage.getItem(examKey) || '{}');
+        examData.isComplete = true;
+        localStorage.setItem(examKey, JSON.stringify(examData));
+      } catch (error) {
+        console.error('Error marking exam complete:', error);
+      }
     }
-    
-    await uploadResults();
+
     setShowScore(true);
     setIsSubmitted(true);
+    await uploadResults();
   };
 
   const getCongratulationMessage = (percentage) => {
@@ -377,10 +507,12 @@ const QuizComponent = () => {
     }
   };
 
-  const normalizedPurpose = (purpose || "").toLowerCase();
-  const displayedScore = normalizedPurpose === "exam" ? Math.min(score, 40) : score;
-  const displayedTotal = normalizedPurpose === "exam" ? 40 : questions.length;
+  // What the student sees: marks out of the paper's own maximum. The old display
+  // hardcoded 40 for exams, while the school's Examination column is worth 60.
+  const displayedScore = normPurpose ? scaledScore : correctCount;
+  const displayedTotal = normPurpose ? paperMax : questions.length;
   const percentageScore = displayedTotal > 0 ? (displayedScore / displayedTotal) * 100 : 0;
+  const displayedGrade = gradeFor(displayedScore, displayedTotal);
 
   // Categorize questions for detailed review
   const getQuestionCategories = () => {
@@ -808,158 +940,304 @@ const QuizComponent = () => {
     }
   };
 
-  const calculateMidtermGrade = (score) => {
-    if (score >= 29) return "A+";
-    if (score >= 26) return "A";
-    if (score >= 24) return "B+";
-    if (score >= 21) return "B";
-    if (score >= 20) return "C+";
-    if (score >= 17) return "C";
-    if (score >= 14) return "D";
-    return "E";
+  // Marks a subject entry can hold: nothing may exceed its own section maximum
+  // (Test 30, Project 10, Examination 60), whatever a caller hands in.
+  const clampToSection = (field, value) => {
+    const n = parseFloat(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(Math.max(n, 0), SECTION_MAX[field]);
   };
 
-  const prepareResultData = async () => {
-    const studentId = await fetchStudentId(name, newClass);
-    if (!studentId) return null;
+  const asNumber = (value) => {
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? n : 0;
+  };
 
-    const isMidterm = purpose && (purpose.toLowerCase() === 'midterm' || purpose.toLowerCase() === 'test');
-    const isExamPurpose = purpose && purpose.toLowerCase() === 'exam';
-    const rawScore = score;
-    const midtermStoredScore = isMidterm ? Math.min(rawScore, 30) : rawScore;
-    const examStoredScore = isExamPurpose ? Math.min(rawScore, 40) : rawScore;
+  const normalizeSubjectKey = (value) => String(value || '').toLowerCase().replace(/[\s.]/g, '');
 
-    const termKey = currentTerm === "1st Term" ? "term1Subjects"
-      : currentTerm === "2nd Term" ? "term2Subjects"
-      : "term3Subjects";
-    
-    const scoreField = (purpose === 'midterm' || purpose === 'test') ? 'ca1' : 'exam';
-    const normalizeSubjectKey = (name) => name.toLowerCase().replace(/[\s.]/g, '');
+  const termKeyFor = (term) => (term === "1st Term" ? "term1Subjects"
+    : term === "2nd Term" ? "term2Subjects"
+      : "term3Subjects");
 
-    const { data: existingResultData } = await supabase
-      .from("jmis_result")
-      .select(termKey)
-      .eq("studentId", studentId)
-      .maybeSingle();
+  // The subject label stored for this class, so a paper named "Maths" still
+  // updates the "Mathematics" row instead of creating a duplicate subject.
+  const canonicalSubjectName = (value, studentClassName) => {
+    const list = schoolSubjects[String(studentClassName || '').toLowerCase().replace(/\s+/g, '')] || [];
+    return list.find((s) => normalizeSubjectKey(s) === normalizeSubjectKey(value)) || value;
+  };
 
-    let termSubjects = existingResultData ? existingResultData[termKey] || [] : [];
-    const subjectIndex = termSubjects.findIndex((item) => normalizeSubjectKey(item.subjectName) === normalizeSubjectKey(subject));
+  // Refetch the paper so the marks are recounted from the questions on the
+  // server, never from a number captured earlier (or saved on this machine).
+  const loadPaper = async (examRowId) => {
+    try {
+      const read = async (columns) => supabase
+        .from('jmis_cbtQuestions')
+        .select(columns)
+        .eq('id', examRowId)
+        .maybeSingle();
 
-    if (subjectIndex !== -1) {
-      const subjectEntry = termSubjects[subjectIndex];
-      if (scoreField === 'ca1') subjectEntry.test = midtermStoredScore.toString();
-      else if (scoreField === 'exam') subjectEntry.examination = examStoredScore.toString();
-      
-      if (!subjectEntry.grade) subjectEntry.grade = "";
-      if (!subjectEntry.remark) subjectEntry.remark = "";
-      if (!subjectEntry.project) subjectEntry.project = "";
-      
-      if (scoreField === 'exam' && parseFloat(subjectEntry.examination || 0) > 40) {
-        subjectEntry.examination = '40';
+      let { data, error } = await read('id, questions, subject, class, purpose, term, maxScore');
+      if (error && /maxScore/i.test(error.message || '')) {
+        // Marks default to one per question until the column is created
+        ({ data, error } = await read('id, questions, subject, class, purpose, term'));
       }
-      
-      subjectEntry.total = parseFloat(subjectEntry.test || 0) + Math.min(parseFloat(subjectEntry.examination || 0), 40) + parseFloat(subjectEntry.project || 0);
-    } else {
-      const normalizedClassKey = newClass.toLowerCase().replace(/\s+/g, '');
-      const availableSubjects = schoolSubjects[normalizedClassKey] || [];
-      const canonicalSubject = availableSubjects.find(s => normalizeSubjectKey(s) === normalizeSubjectKey(subject)) || subject;
+      if (error) return { status: 'error', error };
+      if (!data || !Array.isArray(data.questions) || data.questions.length === 0) return { status: 'missing' };
+      return { status: 'ok', paper: data };
+    } catch (error) {
+      return { status: 'error', error };
+    }
+  };
 
-      termSubjects.push({
-        subjectName: canonicalSubject,
-        test: scoreField === 'ca1' ? midtermStoredScore.toString() : "",
-        grade: "",
-        total: scoreField === 'exam' ? examStoredScore : midtermStoredScore,
-        remark: "",
-        project: "",
-        examination: scoreField === 'exam' ? examStoredScore.toString() : "",
-      });
+  // Class labels and names are stored inconsistently, so an exact match miss
+  // falls back to a case-insensitive one rather than dropping the result.
+  const resolveStudentId = async () => {
+    const direct = await fetchStudentId(name, newClass);
+    if (direct) return direct;
+    try {
+      const { data } = await supabase
+        .from("jmis_student")
+        .select("id")
+        .ilike("name", name.trim())
+        .ilike("class", String(newClass || '').trim().replace(/\s+/g, '%'))
+        .order('id', { ascending: true })
+        .limit(1);
+      return data?.[0]?.id || null;
+    } catch (error) {
+      console.error("Error matching the student: ", error.message);
+      return null;
+    }
+  };
+
+  // ---- persistence --------------------------------------------------------
+  // One submission is recorded once. It is driven entirely by the queued job (the
+  // student's raw answers and the paper id), recounts the marks against the paper
+  // as it is stored, and clamps them to the section maximum, so a retry, an
+  // offline flush or a double press can never add marks twice or record a score
+  // above the maximum. Returns true when the server has accepted the attempt.
+  const persistQueuedSubmission = async (job) => {
+    // The queue is shared by the three session types; only the objective writer
+    // runs here, anything else is left queued for its own screen to flush
+    if ((job.sessionType || 'objective') !== 'objective') return 'skip';
+    if (!job?.examRowId) {
+      console.warn('⚠️ [Persist] Job has no paper id, cannot grade it reliably.');
+      return false;
     }
 
-    const formatClassName = (cls) => cls ? cls.toUpperCase() : "";
-    const formattedClass = formatClassName(newClass);
+    const loaded = await loadPaper(job.examRowId);
+    if (loaded.status === 'error') return false;                     // offline: retry later
+    if (loaded.status === 'missing') {
+      console.error('❌ [Persist] The paper is no longer available:', job.examRowId);
+      return true;                                                    // stop retrying a paper that is gone
+    }
 
-    return {
-      studentId,
-      updatedData: {
-        studentId,
-        studentName: name,
-        studentClass: formattedClass,
-        [termKey]: termSubjects,
-      },
-      newData: {
-        studentId,
-        studentName: name,
-        studentClass: formattedClass,
-        [termKey]: schoolSubjects[newClass.toLowerCase().replace(/\s+/g, '')].map((subj) => ({
-          subjectName: subj,
-          test: normalizeSubjectKey(subj) === normalizeSubjectKey(subject) && scoreField === 'ca1' ? midtermStoredScore.toString() : "",
-          grade: "", 
-          total: normalizeSubjectKey(subj) === normalizeSubjectKey(subject) && scoreField === 'ca1'
-            ? midtermStoredScore
-            : (normalizeSubjectKey(subj) === normalizeSubjectKey(subject) && scoreField === 'exam' ? examStoredScore : 0),
-          remark: "", 
-          project: "", 
-          examination: normalizeSubjectKey(subj) === normalizeSubjectKey(subject) && scoreField === 'exam' ? examStoredScore.toString() : "",
-        })),
-      },
-      existingResult: !!existingResultData
+    const paper = loaded.paper;
+    const questionCount = paper.questions.length;
+    const correct = recomputeCorrect(job.answers, paper.questions);
+    const max = paperMaxScore(paper, questionCount);
+    const purposeNorm = normalizePurpose(paper.purpose ?? job.normPurpose);
+    const marks = storedScore({ correct, questionCount, paperMax: max, purpose: purposeNorm });
+    if (marks === null) return true;                                  // practice paper: nothing stored
+
+    const termKey = termKeyFor(job.termLabel);
+
+    // Newest row for this student: some students hold more than one jmis_result
+    // row, and maybeSingle() would silently pick either of them
+    const { data: rows, error: readError } = await supabase
+      .from('jmis_result')
+      .select(`id, studentId, ${termKey}`)
+      .eq('studentId', job.studentId)
+      .order('id', { ascending: false })
+      .limit(1);
+    if (readError) {
+      console.error('❌ [Persist] Could not read the result row:', readError);
+      return false;
+    }
+
+    const row = rows && rows.length ? rows[0] : null;
+    const storedSubjects = row?.[termKey] || [];
+    const index = storedSubjects.findIndex((e) => normalizeSubjectKey(e.subjectName) === normalizeSubjectKey(job.subject));
+
+    // This exact attempt is already recorded — a retry, not new work
+    if (row && index !== -1 && storedSubjects[index].cbtKey === job.submissionKey) {
+      cleanupAfterSuccess(job);
+      return true;
+    }
+
+    const previous = index !== -1 ? storedSubjects[index] : {};
+    const entry = { ...previous, subjectName: previous.subjectName || canonicalSubjectName(job.subject, job.studentClass) };
+    if (purposeNorm === 'midterm') entry.test = String(marks);
+    else entry.examination = String(marks);
+
+    // Rebuild the total from clamped components, so this row can never add up to
+    // more than 100 or show an Examination above 60
+    const testTotal = clampToSection('midterm', entry.test);
+    const projectTotal = clampToSection('project', entry.project);
+    const examTotal = clampToSection('exam', entry.examination);
+    entry.total = testTotal + projectTotal + examTotal;
+    entry.grade = gradeFor(entry.total, 100);
+    if (entry.remark === undefined || entry.remark === null) entry.remark = "";
+    entry.cbtKey = job.submissionKey;
+    entry.cbt = {
+      correct,
+      questionCount,
+      paperMax: max,
+      stored: marks,
+      section: purposeNorm === 'midterm' ? 'test' : 'examination',
+      sessionType: job.sessionType || 'objective',
+      submittedAt: job.queuedAt || new Date().toISOString(),
     };
+
+    if (row) {
+      // Merge this one subject onto the stored array; every other teacher's
+      // subject is carried over exactly as it was read
+      const merged = index !== -1
+        ? storedSubjects.map((e, i) => (i === index ? entry : e))
+        : [...storedSubjects, entry];
+      const { error: updateError } = await supabase
+        .from('jmis_result')
+        .update({ [termKey]: merged })
+        .eq('id', row.id);
+      if (updateError) {
+        console.error('❌ [Persist] Update failed:', updateError);
+        return false;
+      }
+    } else {
+      const list = schoolSubjects[String(job.studentClass || '').toLowerCase().replace(/\s+/g, '')] || [];
+      const seeded = list.length
+        ? list.map((subj) => (normalizeSubjectKey(subj) === normalizeSubjectKey(job.subject)
+          ? entry
+          : { subjectName: subj, test: "", grade: "", total: 0, remark: "", project: "", examination: "" }))
+        : [entry];
+      const { error: insertError } = await supabase.from('jmis_result').insert([{
+        studentId: job.studentId,
+        studentName: job.studentName,
+        studentClass: job.studentClass ? String(job.studentClass).toUpperCase() : "",
+        [termKey]: seeded,
+      }]);
+      if (insertError) {
+        console.error('❌ [Persist] Insert failed:', insertError);
+        return false;
+      }
+    }
+
+    // Audit trail of the sitting (answers, marks, maximum). Tolerate any failure
+    // here: the result itself is already recorded, and a missing column or table
+    // must never lose a student's marks.
+    try {
+      const { data: existingClaim } = await supabase
+        .from('jmis_cbt_results')
+        .select('id')
+        .eq('submissionKey', job.submissionKey)
+        .maybeSingle();
+      if (!existingClaim) {
+        const { error: claimError } = await supabase.from('jmis_cbt_results').insert([{
+          studentId: job.studentId,
+          studentName: job.studentName,
+          studentClass: job.studentClass,
+          score: correct,
+          totalQuestions: questionCount,
+          maxScore: max,
+          percentage: questionCount > 0 ? ((correct / questionCount) * 100).toFixed(2) : "0",
+          subject: job.subject,
+          term: job.termLabel,
+          purpose: purposeNorm,
+          sessionType: job.sessionType || 'objective',
+          answers: job.answers,
+          submissionKey: job.submissionKey,
+        }]);
+        if (claimError) console.warn('⚠️ [Persist] Audit row not recorded:', claimError.message);
+      }
+    } catch (error) {
+      console.warn('⚠️ [Persist] Audit row not recorded:', error.message);
+    }
+
+    await notifySuccess(job, { correct, questionCount, max, marks, purposeNorm, entry, paperQuestions: paper.questions });
+    cleanupAfterSuccess(job);
+    return true;
   };
 
-  const saveResultToDatabase = async (resultData) => {
+  const cleanupAfterSuccess = (job) => {
+    // The saved attempt is only deleted once the server acknowledged it
+    const key = attemptKeyFor(job.examRowId);
+    if (key) {
+      try { localStorage.removeItem(key); } catch { /* ignore */ }
+    }
+  };
+
+  // ---- notifications ------------------------------------------------------
+  // A result notification is emailed once per attempt. The queue can flush the
+  // same submission from another tab or another session, and a retry that finds
+  // the attempt already recorded must not reach the teachers a second time.
+  const emailAlreadyNotified = (submissionKey) => {
     try {
-      if (resultData.existingResult) {
-        const { error } = await supabase
-          .from("jmis_result")
-          .update(resultData.updatedData)
-          .eq("studentId", resultData.studentId);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase
-          .from("jmis_result")
-          .insert([resultData.newData]);
-        if (error) throw error;
-      }
-      return true;
-    } catch (error) {
-      console.error('Error saving result:', error);
+      const sent = JSON.parse(localStorage.getItem(EMAIL_LOG_KEY) || '[]');
+      return Array.isArray(sent) && sent.includes(submissionKey);
+    } catch {
       return false;
     }
   };
 
-  const sendResultEmail = async () => {
-    console.log('📧 [SendResultEmail] Starting email process...');
-    
-    const isMidterm = purpose && (purpose.toLowerCase() === 'midterm' || purpose.toLowerCase() === 'test');
-    const examType = isMidterm ? 'Mid-term Test' : 'Exam';
-    const action = pendingResult ? 'Updated' : 'Submitted';
-    
-    console.log(`📝 [SendResultEmail] Exam Type: ${examType}, Action: ${action}`);
-    
-    // Format detailed scores like in Result.jsx
-    const detailedScores = questions.map((q, idx) => {
-      const userAnswer = answers[idx];
-      const isCorrect = userAnswer !== undefined && q.answerOptions[userAnswer]?.isCorrect;
-      return `Q${idx + 1}: ${isCorrect ? '✓ Correct' : (userAnswer === undefined ? '⏭ Unattempted' : '✗ Wrong')}`;
+  const markEmailNotified = (submissionKey) => {
+    try {
+      const sent = JSON.parse(localStorage.getItem(EMAIL_LOG_KEY) || '[]');
+      const next = Array.isArray(sent) ? sent : [];
+      if (!next.includes(submissionKey)) next.push(submissionKey);
+      // Exam-room machines are shared, so this log must not grow without end
+      localStorage.setItem(EMAIL_LOG_KEY, JSON.stringify(next.slice(-200)));
+    } catch {
+      /* a notification is a nicety and never a reason to lose a result */
+    }
+  };
+
+  const notifySuccess = async (job, summary) => {
+    if (emailAlreadyNotified(job.submissionKey)) return;
+    markEmailNotified(job.submissionKey);
+    await sendResultEmail(job, summary);
+  };
+
+  // The email describes the attempt exactly as it was graded on the server. It is
+  // built from the queued job and the freshly loaded paper, never from the screen
+  // state, so a result flushed an hour later (or from another tab) still reports
+  // the right figures.
+  const sendResultEmail = async (job, summary) => {
+    const { correct, questionCount, max, marks, purposeNorm, paperQuestions } = summary;
+    const examType = purposeNorm === 'midterm' ? 'Mid-term Test' : 'Exam';
+    const sectionName = SECTION_LABEL[purposeNorm] || 'Examination';
+    const sectionTop = sectionMaxFor(purposeNorm);
+    const scaled = scaleScore(correct, questionCount, max);
+    const percentage = questionCount > 0 ? ((correct / questionCount) * 100).toFixed(2) : '0.00';
+
+    let wrong = 0;
+    let unattempted = 0;
+    const detailedScores = (paperQuestions || []).map((q, idx) => {
+      const userAnswer = job.answers?.[idx];
+      if (userAnswer === undefined) {
+        unattempted++;
+        return `Q${idx + 1}: ⏭ Unattempted`;
+      }
+      if (q.answerOptions?.[userAnswer]?.isCorrect) return `Q${idx + 1}: ✓ Correct`;
+      wrong++;
+      return `Q${idx + 1}: ✗ Wrong`;
     }).join('\n');
 
-    const emailSubject = `CBT ${examType} Result ${action} - ${name}`;
-    const emailMessage = `Student has ${action.toLowerCase()} a CBT ${examType.toLowerCase()}:
+    const emailSubject = `CBT ${examType} Result Submitted - ${job.studentName}`;
+    const emailMessage = `Student has submitted a CBT ${examType.toLowerCase()}:
 
-Student Name: ${name}
-Class: ${newClass}
-Term: ${currentTerm || 'N/A'}
-Subject: ${subject}
+Student Name: ${job.studentName}
+Class: ${job.studentClass}
+Term: ${job.termLabel || 'N/A'}
+Subject: ${job.subject}
 Exam Type: ${examType}
 
 Performance Summary:
-Total Questions: ${questions.length}
-Correct Answers: ${score}
-Incorrect Answers: ${getQuestionCategories().incorrect.length}
-Unattempted: ${getQuestionCategories().unattempted.length}
-Score: ${displayedScore}/${displayedTotal}
-Percentage: ${percentageScore.toFixed(2)}%
-Grade: ${calculateMidtermGrade(score)}
+Total Questions: ${questionCount}
+Correct Answers: ${correct}
+Incorrect Answers: ${wrong}
+Unattempted: ${unattempted}
+Score: ${scaled}/${max} (${percentage}%)
+Marks recorded: ${marks} in the ${sectionName} column (maximum ${sectionTop})
+Grade: ${gradeFor(marks, sectionTop)}
 
 Detailed Breakdown:
 ${detailedScores}
@@ -1004,121 +1282,64 @@ Automated notification from JMIC CBT System`;
     }
   };
 
+  // Submitting never depends on the connection being good right now. The attempt
+  // is queued on the machine first, so a tab closed a second later, a power cut or
+  // an offline room still gets the result uploaded; only then is a flush attempted.
   const uploadResults = async () => {
-    console.log('📝 [UploadResults] Starting upload process...');
-    
-    // Don't save practice scores
-    if (purpose === 'practice') {
-      console.log('ℹ️ [UploadResults] Practice test - skipping save');
-      toast.success("Practice test completed! Results not saved.");
+    console.log('📝 [UploadResults] Queueing submission...');
+
+    // Practice papers (and any purpose the marking scheme has no column for) are
+    // never persisted
+    if (!normPurpose) {
+      toast.success(purpose === 'practice'
+        ? 'Practice test completed! Results not saved.'
+        : 'Test completed! This paper is not linked to a result column, so nothing was saved.');
       return;
     }
 
-    // Check network before attempting save
-    if (networkStatus.quality === 'offline') {
-      console.error('❌ [UploadResults] Network is offline');
-      toast.error('⚠️ No internet connection. Your answers are saved locally and will be uploaded when connection is restored.');
-      setPendingResult(await prepareResultData());
+    if (!examRow?.id) {
+      toast.error('This paper has no identity on the server, so it cannot be graded yet. Please tell your teacher.');
       return;
     }
 
+    const studentId = await resolveStudentId();
+    if (!studentId) {
+      console.error('❌ [UploadResults] No student record matched this name and class');
+      toast.error('Error: your name and class do not match a student record, so the result cannot be saved.');
+      return;
+    }
+
+    const job = buildJob({
+      studentId,
+      studentName: name,
+      studentClass: newClass,
+      examRowId: examRow.id,
+      subject: subject || examRow.subject,
+      termKey: termKeyFor(currentTerm),
+      termLabel: currentTerm,
+      normPurpose,
+      answers: sanitizeAnswers(answers, questions),
+      questions,
+      paperMax,
+    });
+
+    enqueueJob(job);
     setIsSaving(true);
-    let resultData = await prepareResultData();
-    
-    if (!resultData) {
-      console.error('❌ [UploadResults] Failed to prepare result data');
-      toast.error("Error: Unable to fetch student ID.");
-      setIsSaving(false);
-      return;
-    }
-
-    console.log('📊 [UploadResults] Result data prepared:', resultData);
-    
-    // Retry logic - attempt up to 5 times
-    let attempts = 0;
-    const maxAttempts = 5;
-    let success = false;
-    
-    while (attempts < maxAttempts && !success) {
-      attempts++;
-      console.log(`💾 [UploadResults] Attempt ${attempts}/${maxAttempts}...`);
-      
-      if (attempts > 1) {
-        toast.info(`Retrying save... (${attempts}/${maxAttempts})`);
-        // Wait 2 seconds before retry
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // Re-check network
-        if (networkStatus.quality === 'offline') {
-          console.error('❌ [UploadResults] Still offline');
-          toast.error('⚠️ Still offline. Please check your internet connection.');
-          setPendingResult(resultData);
-          setIsSaving(false);
-          return;
-        }
-      }
-      
-      success = await saveResultToDatabase(resultData);
-      
-      if (success) {
-        console.log('✅ [UploadResults] Save successful on attempt', attempts);
-        break;
-      } else {
-        console.error(`❌ [UploadResults] Attempt ${attempts} failed`);
-      }
-    }
-    
-    if (success) {
-      console.log('📧 [UploadResults] Sending email notification...');
-      await sendResultEmail();
-      console.log('✅ [UploadResults] Upload complete');
-      toast.success("✅ Results saved successfully!");
-      setPendingResult(null);
-      setSaveAttempts(0);
-      
-      // Clear localStorage after successful save
-      try {
-        localStorage.removeItem(examId);
-        console.log('🗑️ [AutoSave] Cleared localStorage');
-      } catch (error) {
-        console.error('Error clearing localStorage:', error);
-      }
-    } else {
-      console.error('❌ [UploadResults] All attempts failed, setting pending result');
-      setPendingResult(resultData);
-      setSaveAttempts(attempts);
-      toast.error(`⚠️ Failed to save after ${maxAttempts} attempts. Your answers are saved locally. Click "Retry Save" when connection is restored.`);
-    }
-    
+    await flushRef.current?.();
     setIsSaving(false);
   };
 
-  const handleRetrySave = async () => {
-    if (!pendingResult) return;
-    
-    if (networkStatus.quality === 'offline') {
-      toast.error('Still offline. Please check your connection.');
-      return;
-    }
-
+  // Manual "Upload now": ignores the retry backoff, for a student who can see the
+  // connection is back and wants the result pushed immediately.
+  const handleUploadNow = async () => {
     setIsSaving(true);
-    const success = await saveResultToDatabase(pendingResult);
-    
-    if (success) {
-      await sendResultEmail();
-      setPendingResult(null);
-      setSaveAttempts(0);
-      toast.success("Results saved successfully!");
-    } else {
-      setSaveAttempts(prev => prev + 1);
-      toast.error(`Save failed again (${saveAttempts + 1}/3). Please check your connection.`);
-      
-      if (saveAttempts >= 2) {
-        toast.error('Maximum retry attempts reached. Please contact support.');
-      }
+    try {
+      const { flushed, remaining } = await flushQueue({ submitJob: persistQueuedSubmission, force: true });
+      if (flushed > 0) toast.success(`✅ ${flushed} result(s) uploaded.`);
+      else if (remaining > 0) toast.error('Still offline — the result stays queued on this device and will upload automatically.');
+    } finally {
+      setIsSaving(false);
     }
-    
-    setIsSaving(false);
   };
 
   const handleDownloadResult = () => {
@@ -1133,9 +1354,13 @@ Student Details:
 - Subject: ${subject}
 
 Score:
-- Obtained: ${score}/${questions.length}
-- Percentage: ${((score / questions.length) * 100).toFixed(2)}%
-- Purpose: ${purpose}
+- Correct Answers: ${correctCount} of ${questions.length}
+- Score: ${displayedScore}/${displayedTotal} (${percentageScore.toFixed(2)}%)
+- Grade: ${displayedGrade}
+- Exam Type: ${purpose}
+${normPurpose
+  ? `- Marks recorded: ${storedMarks} in the ${SECTION_LABEL[normPurpose]} column (maximum ${sectionMax})`
+  : '- Marks recorded: none (this paper is not linked to a result column)'}
 
 Generated: ${new Date().toLocaleString()}
     `.trim();
@@ -1170,6 +1395,30 @@ Generated: ${new Date().toLocaleString()}
       }}>
         {networkStatus.quality === 'good' ? '✓ Good Network' : networkStatus.quality === 'poor' ? '⚠ Poor Network' : '✗ Offline'}
       </div>
+
+      {/* Persistent offline-queue notice: a submission is kept on the machine and
+          retried until the server acknowledges it, so this stays visible from any
+          screen rather than only on the results panel */}
+      {queueCount > 0 && (
+        <div
+          onClick={handleUploadNow}
+          title="Click to try uploading now"
+          style={{
+            position: 'fixed',
+            bottom: '20px',
+            right: '20px',
+            zIndex: 9999,
+            padding: '8px 16px',
+            borderRadius: '20px',
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+            backgroundColor: '#FFC107',
+            color: 'black'
+          }}>
+          ⏳ {queueCount} exam result(s) queued on this device — will upload automatically when the connection returns
+        </div>
+      )}
       
       {/* Auto-Save Status Indicator */}
       {lastSaved && (
@@ -1245,13 +1494,25 @@ Generated: ${new Date().toLocaleString()}
                 <div className="score-content">
                   <FaTrophy className="score-icon" />
                   <h2>Congratulations!</h2>
-                  <p>Your {purpose === 'midterm' ? 'mid-term test' : purpose === 'exam' ? 'exam' : 'practice test'} has been submitted successfully.</p>
+                  <p>Your {normPurpose === 'midterm' ? 'mid-term test' : normPurpose === 'exam' ? 'exam' : 'practice test'} has been submitted.</p>
                   <p>{getCongratulationMessage(percentageScore)}</p>
                   <p><strong>Subject:</strong> {subject}</p>
                   <p><strong>Score:</strong> {displayedScore} out of {displayedTotal} ({percentageScore.toFixed(2)}%)</p>
+                  <p style={{ fontSize: '0.95rem', color: '#555' }}>
+                    Correct answers: {correctCount} of {questions.length}
+                    {normPurpose && paperMax > sectionMax
+                      ? ` — capped at ${sectionMax} for the ${SECTION_LABEL[normPurpose]} section`
+                      : ''}
+                  </p>
+                  {normPurpose && (
+                    <p style={{ fontSize: '0.95rem', color: '#555' }}>
+                      <strong>Grade:</strong> {displayedGrade}
+                    </p>
+                  )}
                   
-                  {/* Show retry save button if save failed */}
-                  {pendingResult && (
+                  {/* Anything still waiting on this device is shown here rather
+                      than as a one-off "save failed" message */}
+                  {queueCount > 0 && (
                     <div style={{ 
                       marginTop: '20px', 
                       padding: '15px', 
@@ -1260,16 +1521,16 @@ Generated: ${new Date().toLocaleString()}
                       borderRadius: '4px'
                     }}>
                       <p style={{ color: '#856404', marginBottom: '10px' }}>
-                        ⚠️ Results not saved to database due to network issues.
-                        {saveAttempts > 0 && ` (Attempted ${saveAttempts} time(s))`}
+                        ⏳ {queueCount} exam result(s) queued on this device — they will upload
+                        automatically as soon as the connection allows.
                       </p>
                       <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                         <button 
-                          onClick={handleRetrySave} 
-                          disabled={isSaving || networkStatus.quality === 'offline'}
+                          onClick={handleUploadNow}
+                          disabled={isSaving}
                           className="btn btn-warning"
                         >
-                          {isSaving ? 'Saving...' : 'Retry Save'}
+                          {isSaving ? 'Uploading...' : 'Upload now'}
                         </button>
                         <button onClick={handleDownloadResult} className="btn btn-success">
                           Download Result
@@ -1283,11 +1544,11 @@ Generated: ${new Date().toLocaleString()}
                     <button 
                       onClick={handleSubmitExam} 
                       className="btn btn-primary"
-                      disabled={isSaving}
+                      disabled={isSaving || isSubmitted}
                     >
                       {isSaving ? 'Saving...' : isSubmitted ? "✓ Exam Submitted" : "Submit Exam"}
                     </button>
-                    {!pendingResult && (
+                    {queueCount === 0 && (
                       <>
                         <button onClick={handleDownloadResult} className="btn btn-success">
                           📥 Download Result
@@ -1314,8 +1575,8 @@ Generated: ${new Date().toLocaleString()}
                   <div className="question-section">
                     <div className="question-count text-primary" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div><span>Question {currentQuestion + 1}</span>/{questions.length}</div>
-                      <button onClick={handleSubmitExam} className="btn btn-danger">
-                        Submit Exam
+                      <button onClick={handleSubmitExam} className="btn btn-danger" disabled={isSaving || isSubmitted}>
+                        {isSaving ? 'Submitting...' : 'Submit Exam'}
                       </button>
                     </div>
                     <div className="question-text">{currentQuestion + 1}. {questions[currentQuestion].questionText}</div>
