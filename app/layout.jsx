@@ -7,7 +7,7 @@ export const metadata = {
   title: "JMIS School — Jeshurun Montessori International School",
   description:
     "Jeshurun Montessori International School — a nurturing, values-driven education from Creche to Secondary. Discover our programmes, facilities and admissions process.",
-  icons: { icon: "/favicon.ico" },
+  icons: { icon: "/favicon.ico?v=4", apple: "/apple-touch-icon.png" },
 };
 
 export default function RootLayout({ children }) {
